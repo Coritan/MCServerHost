@@ -1,0 +1,30 @@
+modLoader="javafml"
+loaderVersion="[14,)"
+license="All Rights Reserved"
+
+[[mods]]
+    modId="mcserverhost"
+    version="1.1.0"
+    displayName="MCServerHost"
+    description='''
+        MCServerHost IP parsing capabilities for Forge servers.
+        Intercepts player handshakes to rewrite IP addresses sent by the MCSH proxy infrastructure.
+    '''
+    authors="https://www.mcserverhost.com"
+
+    [[mods.dependencies.mcserverhost]]
+        modId="forge"
+        mandatory=true
+        versionRange="[14,)"
+        ordering="NONE"
+        side="SERVER"
+
+    [[mods.dependencies.mcserverhost]]
+        modId="minecraft"
+        mandatory=true
+        versionRange="[1.12,)"
+        ordering="NONE"
+        side="SERVER"
+
+[[mixins]]
+    config="mcserverhost.mixins.json"

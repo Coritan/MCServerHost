@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.mcserverhost.mixin",
+  "compatibilityLevel": "JAVA_8",
+  "mixins": [],
+  "server": [
+    "MixinNetworkManager",
+    "MixinClientIntentionPacket",
+    "MixinClientIntentionPacket112",
+    "MixinClientIntentionPacket121"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

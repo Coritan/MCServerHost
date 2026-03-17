@@ -1,0 +1,15 @@
+[
+{
+  "modid": "mcserverhost",
+  "name": "MCServerHost",
+  "description": "MCServerHost IP parsing capabilities for Forge servers. Intercepts player handshakes to rewrite IP addresses sent by the MCSH proxy infrastructure.",
+  "version": "1.1.0",
+  "mcversion": "1.12.2",
+  "url": "https://www.mcserverhost.com",
+  "authorList": ["https://www.mcserverhost.com"],
+  "credits": "",
+  "logoFile": "",
+  "screenshots": [],
+  "dependencies": []
+}
+]

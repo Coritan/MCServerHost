@@ -1,0 +1,14 @@
+name: MCServerHost
+version: 1.1.0
+main: com.mcserverhost.BukkitPlugin
+softdepend:
+- ProtocolLib
+- floodgate
+author: https://www.mcserverhost.com
+description: MCServerHost IP parsing capabilities for Bukkit/Spigot/Paper
+commands:
+  mcsh:
+    description: Transfer to the hub server
+  stop:
+    description: Send all players to hub then stop the server
+    permission: minecraft.command.stop

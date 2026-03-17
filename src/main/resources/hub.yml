@@ -1,0 +1,26 @@
+# MCServerHost - Hub Configuration
+
+# The hostname or IP address of the hub server players will be sent to.
+# This is the server they land on when using /mcsh or any configured alias.
+host: mcsh.io
+
+# The port of the hub server.
+port: 25577
+
+# Additional command names that also trigger a hub transfer.
+# /mcsh is always available as the base command regardless of this list.
+# Add or remove entries to suit your network's naming conventions.
+aliases:
+  - mh
+  - mk
+
+# Whether to register the /mcsh command (and any configured aliases).
+# Set to false to disable the hub transfer command entirely.
+# This does not affect send-to-hub-on-shutdown behaviour.
+hub-command-enabled: true
+
+# Whether to automatically send all online players to the hub when this
+# server shuts down or crashes. Useful for keeping players on the network
+# instead of being dropped entirely.
+# Set to false if you do not want this behaviour.
+send-to-hub-on-shutdown: true
