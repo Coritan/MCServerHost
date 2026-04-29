@@ -1,5 +1,7 @@
 # MCServerHost Plugin
 
+> **DO NOT build this project locally.** GitHub Actions handles all builds — see `.github/workflows/build.yml`. Do not run `gradle`, `gradlew`, or any build script; there is no local `build.sh`.
+
 **Version:** 1.1.0
 
 A universal Minecraft plugin/mod that restores true player IP addresses on servers running behind [MCServerHost](https://www.mcserverhost.com) proxy infrastructure. When players connect through the proxy, their real IP and hostname are embedded in the handshake payload — this plugin intercepts that payload at the network level, validates it, and rewrites the connection so the backend server sees the player's actual IP instead of the proxy's.
