@@ -56,16 +56,9 @@ public class LegacyNettyHandshakeInterceptor {
             log.info("[MCServerHost] [attempt " + attempt + "] server found: " + server.getClass().getName());
         }
 
-        Object networkSystem = findNetworkSystemIn(server, plugin);
-        if (networkSystem == null) {
-            if (attempt % 20 == 0) log.info("[MCServerHost] [attempt " + attempt + "] network system not yet available on server");
-            return false;
-        }
-        log.info("[MCServerHost] network system found: " + networkSystem.getClass().getName());
-
-        List<?> endpoints = findChannelFutureList(networkSystem, plugin);
+        List<?> endpoints = findChannelFutureListDeep(server, plugin, attempt);
         if (endpoints == null || endpoints.isEmpty()) {
-            if (attempt % 20 == 0) log.info("[MCServerHost] [attempt " + attempt + "] no channel futures yet");
+            if (attempt % 20 == 0) log.info("[MCServerHost] [attempt " + attempt + "] no channel futures yet (deep scan)");
             return false;
         }
         log.info("[MCServerHost] endpoints count: " + endpoints.size());
@@ -133,50 +126,150 @@ public class LegacyNettyHandshakeInterceptor {
         return null;
     }
 
+    private static sun.misc.Unsafe UNSAFE;
+    static {
+        try {
+            Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+            uf.setAccessible(true);
+            UNSAFE = (sun.misc.Unsafe) uf.get(null);
+        } catch (Throwable ignored) {}
+    }
+
+    private static Object readField(Object target, Field f) {
+        try {
+            f.setAccessible(true);
+            return f.get(target);
+        } catch (Throwable t1) {
+            if (UNSAFE == null) return null;
+            try {
+                long off = UNSAFE.objectFieldOffset(f);
+                return UNSAFE.getObject(target, off);
+            } catch (Throwable t2) {
+                return null;
+            }
+        }
+    }
+
+    private static void writeField(Object target, Field f, Object value) throws Throwable {
+        try {
+            f.setAccessible(true);
+            f.set(target, value);
+            return;
+        } catch (Throwable ignored) {}
+        if (UNSAFE == null) throw new IllegalStateException("Unsafe unavailable to write " + f);
+        long off = UNSAFE.objectFieldOffset(f);
+        UNSAFE.putObject(target, off, value);
+    }
+
     private static Object findNetworkSystemIn(Object obj, PluginBase plugin) {
         if (obj == null) return null;
+        Logger log = plugin.getLogger();
         Class<?> c = obj.getClass();
+        int scanned = 0, skipped = 0;
         while (c != null && c != Object.class) {
             for (Field f : c.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
                 Class<?> ft = f.getType();
-                if (ft.isPrimitive() || ft.isArray() || ft == String.class) continue;
-                try {
-                    f.setAccessible(true);
-                    Object v = f.get(obj);
-                    if (v == null) continue;
-                    if (findChannelFutureList(v, null) != null) {
-                        plugin.getLogger().info("[MCServerHost] Network system found on " + c.getName() + "." + f.getName() + " (" + v.getClass().getName() + ")");
-                        return v;
-                    }
-                } catch (Throwable ignored) {}
+                if (ft.isPrimitive() || ft.isArray() || ft == String.class || ft == Class.class) { skipped++; continue; }
+                scanned++;
+                Object v = readField(obj, f);
+                if (v == null) continue;
+                if (findChannelFutureList(v, null) != null) {
+                    log.info("[MCServerHost] Network system found on " + c.getName() + "." + f.getName() + " (" + v.getClass().getName() + ")");
+                    return v;
+                }
             }
             c = c.getSuperclass();
         }
+        log.warning("[MCServerHost] findNetworkSystemIn scanned " + scanned + " fields (skipped " + skipped + "), none matched. Dumping all fields on " + obj.getClass().getName() + ":");
+        dumpFields(obj, plugin);
         return null;
+    }
+
+    private static void dumpFields(Object obj, PluginBase plugin) {
+        Logger log = plugin.getLogger();
+        Class<?> c = obj.getClass();
+        while (c != null && c != Object.class) {
+            for (Field f : c.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                Object v = readField(obj, f);
+                String vtype = v == null ? "null" : v.getClass().getName();
+                log.info("  " + c.getSimpleName() + "." + f.getName() + " : " + f.getType().getName() + " = " + vtype);
+            }
+            c = c.getSuperclass();
+        }
     }
 
     private static List<?> findChannelFutureList(Object obj, PluginBase plugin) {
         Class<?> c = obj.getClass();
         while (c != null && c != Object.class) {
             for (Field f : c.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
                 if (!List.class.isAssignableFrom(f.getType())) continue;
-                try {
-                    f.setAccessible(true);
-                    Object v = f.get(obj);
-                    if (!(v instanceof List)) continue;
-                    List<?> list = (List<?>) v;
-                    if (list.isEmpty()) continue;
-                    Object first = list.get(0);
-                    if (first == null) continue;
-                    String tn = first.getClass().getName();
-                    if (tn.contains("ChannelFuture") || tn.startsWith("io.netty.channel.")) {
-                        if (plugin != null) plugin.getLogger().info("[MCServerHost] Channel list found on " + c.getName() + "." + f.getName() + " (element=" + tn + ")");
-                        return list;
-                    }
-                } catch (Throwable ignored) {}
+                Object v = readField(obj, f);
+                if (!(v instanceof List)) continue;
+                List<?> list = (List<?>) v;
+                if (list.isEmpty()) continue;
+                Object first = list.get(0);
+                if (first == null) continue;
+                String tn = first.getClass().getName();
+                if (tn.contains("ChannelFuture") || tn.startsWith("io.netty.channel.")) {
+                    if (plugin != null) plugin.getLogger().info("[MCServerHost] Channel list found on " + c.getName() + "." + f.getName() + " (element=" + tn + ")");
+                    return list;
+                }
             }
             c = c.getSuperclass();
         }
+        return null;
+    }
+
+    private static List<?> findChannelFutureListDeep(Object root, PluginBase plugin, int attempt) {
+        Logger log = plugin.getLogger();
+        java.util.Set<Object> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        java.util.ArrayDeque<Object> queue = new java.util.ArrayDeque<>();
+        queue.add(root);
+        seen.add(root);
+        int nodes = 0;
+        while (!queue.isEmpty() && nodes < 4000) {
+            Object obj = queue.poll();
+            nodes++;
+            List<?> direct = findChannelFutureList(obj, null);
+            if (direct != null) {
+                log.info("[MCServerHost] deep scan: found channel list on " + obj.getClass().getName() + " after " + nodes + " nodes");
+                return direct;
+            }
+            Class<?> c = obj.getClass();
+            while (c != null && c != Object.class) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    Class<?> ft = f.getType();
+                    if (ft.isPrimitive() || ft.isArray() || ft == String.class || ft == Class.class) continue;
+                    if (ft.getName().startsWith("java.lang.") && ft != Object.class) continue;
+                    if (ft.getName().startsWith("java.util.concurrent.atomic")) continue;
+                    Object v = readField(obj, f);
+                    if (v == null) continue;
+                    if (v instanceof List) {
+                        List<?> list = (List<?>) v;
+                        if (!list.isEmpty()) {
+                            Object first = list.get(0);
+                            if (first != null) {
+                                String tn = first.getClass().getName();
+                                if (tn.contains("ChannelFuture") || tn.startsWith("io.netty.channel.")) {
+                                    log.info("[MCServerHost] deep scan: matched List field " + c.getName() + "." + f.getName() + " element " + tn);
+                                    return list;
+                                }
+                            }
+                        }
+                    }
+                    String vn = v.getClass().getName();
+                    if (vn.startsWith("java.") || vn.startsWith("com.mojang.authlib")
+                            || vn.startsWith("org.apache") || vn.startsWith("io.netty.buffer")) continue;
+                    if (seen.add(v)) queue.add(v);
+                }
+                c = c.getSuperclass();
+            }
+        }
+        if (attempt % 20 == 0) log.info("[MCServerHost] deep scan exhausted " + nodes + " nodes without finding channel list");
         return null;
     }
 
