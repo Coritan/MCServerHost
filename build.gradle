@@ -219,9 +219,8 @@ void updateYamls() {
 
 void updateJsons() {
     def velocityJson = new File('src/main/resources/velocity-plugin.json')
-    def fabricJson = new File('src/main/resources/fabric.mod.json')
 
-    [velocityJson, fabricJson].each { file ->
+    [velocityJson].each { file ->
         file.newInputStream().withCloseable { inputStream ->
             new InputStreamReader(inputStream, StandardCharsets.UTF_8).withCloseable { inputStreamReader ->
                 JsonObject object = JsonParser.parseReader(inputStreamReader).getAsJsonObject()
