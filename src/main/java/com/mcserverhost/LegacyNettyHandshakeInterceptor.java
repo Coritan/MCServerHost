@@ -5,28 +5,11 @@ import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.logging.Logger;
 
 /**
  * Mapping-agnostic Netty-based handshake interceptor. Primary install path
- * on Fabric (Yarn/Intermediary makes named reflection impractical) and
- * fallback on legacy Forge 1.12 and older (no Mixin).
- *
- * Discovery:
- *   - The MinecraftServer instance is captured by a mixin into its
- *     constructor (see FabricServerHolder + mixin.fabric.MixinMinecraftServer).
- *     We also try a class-getter fallback so legacy Forge (<=1.12) still
- *     works without the mixin.
- *   - On the server instance, locate a field whose value transitively
- *     exposes a List of io.netty.channel.ChannelFuture (the network system).
- *
- * Injection:
- *   - For each listening server channel, install an "accept observer" that
- *     fires on channelRead. The msg IS the new child Channel.
- *   - For each child, defer interceptor insertion onto the child's
- *     EventLoop. That guarantees it runs AFTER Minecraft's ChannelInitializer
- *     has populated the pipeline with "packet_handler". We then insert our
- *     handler with addBefore("packet_handler", ...) so it receives fully
- *     decoded handshake packet objects.
+ * on Fabric and fallback on legacy Forge <=1.12.
  */
 public class LegacyNettyHandshakeInterceptor {
 
@@ -34,6 +17,8 @@ public class LegacyNettyHandshakeInterceptor {
     private static final String HANDSHAKE_INTERCEPTOR_NAME = "mcsh_handshake_interceptor";
 
     public static void install(PluginBase plugin) {
+        Logger log = plugin.getLogger();
+        log.info("[MCServerHost] Starting Netty installer thread...");
         Thread installThread = new Thread(() -> {
             for (int attempt = 0; attempt < 120; attempt++) {
                 try {
@@ -43,74 +28,103 @@ public class LegacyNettyHandshakeInterceptor {
                     return;
                 }
                 try {
-                    if (tryInstall(plugin)) {
-                        plugin.getLogger().info("[MCServerHost] Netty handshake interceptor installed.");
+                    if (tryInstall(plugin, attempt)) {
+                        log.info("[MCServerHost] Netty handshake interceptor installed on attempt " + attempt + ".");
                         return;
                     }
                 } catch (Throwable e) {
-                    if (attempt == 0 || attempt == 60) {
-                        plugin.getLogger().warning("[MCServerHost] Install attempt " + attempt + " failed: " + e.getMessage());
+                    if (attempt % 20 == 0) {
+                        log.warning("[MCServerHost] Install attempt " + attempt + " threw: " + e);
+                        e.printStackTrace();
                     }
                 }
             }
-            plugin.getLogger().warning("[MCServerHost] Could not install Netty handshake interceptor after retries.");
+            log.warning("[MCServerHost] Could not install Netty handshake interceptor after retries.");
         }, "MCSH-NettyInstaller");
         installThread.setDaemon(true);
         installThread.start();
     }
 
-    private static boolean tryInstall(PluginBase plugin) throws Throwable {
-        List<Object> serverChannels = findServerChannels();
-        if (serverChannels.isEmpty()) return false;
+    private static boolean tryInstall(PluginBase plugin, int attempt) throws Throwable {
+        Logger log = plugin.getLogger();
+        Object server = findMinecraftServer(plugin, attempt);
+        if (server == null) {
+            if (attempt % 20 == 0) log.info("[MCServerHost] [attempt " + attempt + "] server instance not yet available");
+            return false;
+        }
+        if (attempt % 20 == 0 || attempt == 1) {
+            log.info("[MCServerHost] [attempt " + attempt + "] server found: " + server.getClass().getName());
+        }
+
+        Object networkSystem = findNetworkSystemIn(server, plugin);
+        if (networkSystem == null) {
+            if (attempt % 20 == 0) log.info("[MCServerHost] [attempt " + attempt + "] network system not yet available on server");
+            return false;
+        }
+        log.info("[MCServerHost] network system found: " + networkSystem.getClass().getName());
+
+        List<?> endpoints = findChannelFutureList(networkSystem, plugin);
+        if (endpoints == null || endpoints.isEmpty()) {
+            if (attempt % 20 == 0) log.info("[MCServerHost] [attempt " + attempt + "] no channel futures yet");
+            return false;
+        }
+        log.info("[MCServerHost] endpoints count: " + endpoints.size());
 
         Class<?> channelHandlerClass = Class.forName("io.netty.channel.ChannelHandler");
 
         boolean any = false;
-        for (Object serverChannel : serverChannels) {
+        for (Object endpoint : endpoints) {
             try {
-                if (installAcceptObserver(serverChannel, channelHandlerClass, plugin)) any = true;
+                Object channel = resolveChannel(endpoint);
+                if (channel == null) continue;
+                log.info("[MCServerHost] server channel: " + channel.getClass().getName() + " -> " + channel);
+                if (installAcceptObserver(channel, channelHandlerClass, plugin)) any = true;
             } catch (Throwable e) {
-                plugin.getLogger().warning("[MCServerHost] Failed to install on server channel: " + e.getMessage());
+                log.warning("[MCServerHost] Failed on endpoint: " + e);
+                e.printStackTrace();
             }
         }
         return any;
     }
 
     // -------------------------------------------------------------------------
-    // Server channel discovery
+    // Server discovery
     // -------------------------------------------------------------------------
 
-    private static List<Object> findServerChannels() {
-        List<Object> out = new ArrayList<>();
-        Object server = findMinecraftServer();
-        if (server == null) return out;
-
-        Object networkSystem = findNetworkSystemIn(server);
-        if (networkSystem == null) return out;
-
-        List<?> endpoints = findChannelFutureList(networkSystem);
-        if (endpoints == null) return out;
-
-        for (Object endpoint : endpoints) {
-            try {
-                Object channel = resolveChannel(endpoint);
-                if (channel != null) out.add(channel);
-            } catch (Throwable ignored) {}
-        }
-        return out;
-    }
-
-    private static Object findMinecraftServer() {
+    private static Object findMinecraftServer(PluginBase plugin, int attempt) {
         Object captured = FabricServerHolder.getServer();
-        if (captured != null) return captured;
+        if (captured != null) {
+            if (attempt == 1) plugin.getLogger().info("[MCServerHost] Server obtained from FabricServerHolder (mixin): " + captured.getClass().getName());
+            return captured;
+        }
+
+        try {
+            Class<?> fabricLoader = Class.forName("net.fabricmc.loader.api.FabricLoader");
+            Object loader = fabricLoader.getMethod("getInstance").invoke(null);
+            Object game = fabricLoader.getMethod("getGameInstance").invoke(loader);
+            if (game != null) {
+                if (attempt == 1) plugin.getLogger().info("[MCServerHost] Server obtained via FabricLoader.getGameInstance(): " + game.getClass().getName());
+                FabricServerHolder.setServer(game);
+                return game;
+            }
+            if (attempt % 20 == 0) plugin.getLogger().info("[MCServerHost] FabricLoader.getGameInstance() returned null");
+        } catch (ClassNotFoundException nf) {
+            if (attempt == 1) plugin.getLogger().info("[MCServerHost] FabricLoader not present (non-Fabric environment)");
+        } catch (Throwable e) {
+            if (attempt % 20 == 0) plugin.getLogger().warning("[MCServerHost] FabricLoader.getGameInstance() failed: " + e);
+        }
 
         try {
             Class<?> serverClass = Class.forName("net.minecraft.server.MinecraftServer");
             for (Method m : serverClass.getMethods()) {
-                if (m.getParameterCount() == 0 && serverClass.isAssignableFrom(m.getReturnType())) {
+                if (m.getParameterCount() == 0 && serverClass.isAssignableFrom(m.getReturnType())
+                        && java.lang.reflect.Modifier.isStatic(m.getModifiers())) {
                     try {
                         Object v = m.invoke(null);
-                        if (v != null) return v;
+                        if (v != null) {
+                            plugin.getLogger().info("[MCServerHost] Server obtained via static MinecraftServer." + m.getName() + "()");
+                            return v;
+                        }
                     } catch (Throwable ignored) {}
                 }
             }
@@ -119,7 +133,7 @@ public class LegacyNettyHandshakeInterceptor {
         return null;
     }
 
-    private static Object findNetworkSystemIn(Object obj) {
+    private static Object findNetworkSystemIn(Object obj, PluginBase plugin) {
         if (obj == null) return null;
         Class<?> c = obj.getClass();
         while (c != null && c != Object.class) {
@@ -130,7 +144,10 @@ public class LegacyNettyHandshakeInterceptor {
                     f.setAccessible(true);
                     Object v = f.get(obj);
                     if (v == null) continue;
-                    if (findChannelFutureList(v) != null) return v;
+                    if (findChannelFutureList(v, null) != null) {
+                        plugin.getLogger().info("[MCServerHost] Network system found on " + c.getName() + "." + f.getName() + " (" + v.getClass().getName() + ")");
+                        return v;
+                    }
                 } catch (Throwable ignored) {}
             }
             c = c.getSuperclass();
@@ -138,7 +155,7 @@ public class LegacyNettyHandshakeInterceptor {
         return null;
     }
 
-    private static List<?> findChannelFutureList(Object obj) {
+    private static List<?> findChannelFutureList(Object obj, PluginBase plugin) {
         Class<?> c = obj.getClass();
         while (c != null && c != Object.class) {
             for (Field f : c.getDeclaredFields()) {
@@ -153,6 +170,7 @@ public class LegacyNettyHandshakeInterceptor {
                     if (first == null) continue;
                     String tn = first.getClass().getName();
                     if (tn.contains("ChannelFuture") || tn.startsWith("io.netty.channel.")) {
+                        if (plugin != null) plugin.getLogger().info("[MCServerHost] Channel list found on " + c.getName() + "." + f.getName() + " (element=" + tn + ")");
                         return list;
                     }
                 } catch (Throwable ignored) {}
@@ -165,8 +183,7 @@ public class LegacyNettyHandshakeInterceptor {
     private static Object resolveChannel(Object endpoint) throws Throwable {
         String typeName = endpoint.getClass().getName();
         if (typeName.contains("ChannelFuture")) {
-            Method channel = endpoint.getClass().getMethod("channel");
-            return channel.invoke(endpoint);
+            return endpoint.getClass().getMethod("channel").invoke(endpoint);
         }
         return endpoint;
     }
@@ -176,12 +193,21 @@ public class LegacyNettyHandshakeInterceptor {
     // -------------------------------------------------------------------------
 
     private static boolean installAcceptObserver(Object serverChannel, Class<?> channelHandlerClass, PluginBase plugin) throws Throwable {
+        Logger log = plugin.getLogger();
         Object pipeline = serverChannel.getClass().getMethod("pipeline").invoke(serverChannel);
         Class<?> pipelineClass = pipeline.getClass();
 
         try {
             Object existing = pipelineClass.getMethod("get", String.class).invoke(pipeline, ACCEPT_OBSERVER_NAME);
-            if (existing != null) return true;
+            if (existing != null) {
+                log.info("[MCServerHost] Accept observer already present");
+                return true;
+            }
+        } catch (Throwable ignored) {}
+
+        try {
+            Object names = pipelineClass.getMethod("names").invoke(pipeline);
+            log.info("[MCServerHost] Parent pipeline names: " + names);
         } catch (Throwable ignored) {}
 
         Object observer = java.lang.reflect.Proxy.newProxyInstance(
@@ -194,9 +220,12 @@ public class LegacyNettyHandshakeInterceptor {
                     Object child = args[1];
                     try {
                         if (child != null && isChannel(child)) {
+                            log.info("[MCServerHost] New child channel accepted: " + child);
                             scheduleInterceptorInsertion(child, channelHandlerClass, plugin);
                         }
-                    } catch (Throwable ignored) {}
+                    } catch (Throwable e) {
+                        log.warning("[MCServerHost] accept observer error: " + e);
+                    }
                     try {
                         Method fire = ctx.getClass().getMethod("fireChannelRead", Object.class);
                         fire.invoke(ctx, child);
@@ -210,89 +239,81 @@ public class LegacyNettyHandshakeInterceptor {
         try {
             Method addFirst = pipelineClass.getMethod("addFirst", String.class, channelHandlerClass);
             addFirst.invoke(pipeline, ACCEPT_OBSERVER_NAME, observer);
+            log.info("[MCServerHost] Accept observer installed on " + serverChannel);
             return true;
-        } catch (Throwable ignored) {}
-        return false;
+        } catch (Throwable e) {
+            log.warning("[MCServerHost] addFirst failed: " + e);
+            return false;
+        }
     }
 
     private static void scheduleInterceptorInsertion(Object childChannel, Class<?> channelHandlerClass, PluginBase plugin) {
+        Logger log = plugin.getLogger();
         try {
             Object eventLoop = childChannel.getClass().getMethod("eventLoop").invoke(childChannel);
-            Runnable task = () -> {
-                try {
-                    Object pipeline = childChannel.getClass().getMethod("pipeline").invoke(childChannel);
-                    addHandshakeInterceptor(pipeline, channelHandlerClass, plugin);
-                } catch (Throwable ignored) {}
-            };
+            Runnable task = () -> addHandshakeInterceptorWithRetry(childChannel, channelHandlerClass, plugin, 0);
             Method execute = eventLoop.getClass().getMethod("execute", Runnable.class);
             execute.invoke(eventLoop, task);
-        } catch (Throwable ignored) {
-            try {
-                Object pipeline = childChannel.getClass().getMethod("pipeline").invoke(childChannel);
-                addHandshakeInterceptor(pipeline, channelHandlerClass, plugin);
-            } catch (Throwable ignored2) {}
+        } catch (Throwable e) {
+            log.warning("[MCServerHost] Failed to schedule interceptor insertion: " + e);
+            addHandshakeInterceptorWithRetry(childChannel, channelHandlerClass, plugin, 0);
         }
     }
 
-    private static void addHandshakeInterceptor(Object pipeline, Class<?> channelHandlerClass, PluginBase plugin) {
+    private static void addHandshakeInterceptorWithRetry(Object childChannel, Class<?> channelHandlerClass, PluginBase plugin, int attempt) {
+        Logger log = plugin.getLogger();
         try {
+            Object pipeline = childChannel.getClass().getMethod("pipeline").invoke(childChannel);
             Object existing = pipeline.getClass().getMethod("get", String.class).invoke(pipeline, HANDSHAKE_INTERCEPTOR_NAME);
             if (existing != null) return;
-        } catch (Throwable ignored) {}
 
-        Object interceptor = java.lang.reflect.Proxy.newProxyInstance(
-            LegacyNettyHandshakeInterceptor.class.getClassLoader(),
-            new Class[]{channelHandlerClass},
-            (proxy, method, args) -> {
-                String methodName = method.getName();
-                if (methodName.equals("channelRead") && args != null && args.length == 2) {
-                    Object ctx = args[0];
-                    Object packet = args[1];
-                    tryInterceptPacket(ctx, packet, plugin);
+            Object packetHandler = pipeline.getClass().getMethod("get", String.class).invoke(pipeline, "packet_handler");
+            if (packetHandler == null) {
+                if (attempt < 10) {
                     try {
-                        Method fire = ctx.getClass().getMethod("fireChannelRead", Object.class);
-                        fire.invoke(ctx, packet);
+                        Object eventLoop = childChannel.getClass().getMethod("eventLoop").invoke(childChannel);
+                        Method schedule = eventLoop.getClass().getMethod("schedule", Runnable.class, long.class, java.util.concurrent.TimeUnit.class);
+                        schedule.invoke(eventLoop, (Runnable) () -> addHandshakeInterceptorWithRetry(childChannel, channelHandlerClass, plugin, attempt + 1), 10L, java.util.concurrent.TimeUnit.MILLISECONDS);
+                        return;
                     } catch (Throwable ignored) {}
-                    return null;
                 }
-                return defaultInvoke(proxy, method, args);
+                try {
+                    Object names = pipeline.getClass().getMethod("names").invoke(pipeline);
+                    log.warning("[MCServerHost] packet_handler never appeared. Pipeline names: " + names);
+                } catch (Throwable ignored) {}
+                return;
             }
-        );
 
-        boolean inserted = false;
-        try {
+            try {
+                Object names = pipeline.getClass().getMethod("names").invoke(pipeline);
+                log.info("[MCServerHost] Child pipeline names before insert: " + names);
+            } catch (Throwable ignored) {}
+
+            Object interceptor = java.lang.reflect.Proxy.newProxyInstance(
+                LegacyNettyHandshakeInterceptor.class.getClassLoader(),
+                new Class[]{channelHandlerClass},
+                (proxy, method, args) -> {
+                    String methodName = method.getName();
+                    if (methodName.equals("channelRead") && args != null && args.length == 2) {
+                        Object ctx = args[0];
+                        Object packet = args[1];
+                        tryInterceptPacket(ctx, packet, plugin);
+                        try {
+                            Method fire = ctx.getClass().getMethod("fireChannelRead", Object.class);
+                            fire.invoke(ctx, packet);
+                        } catch (Throwable ignored) {}
+                        return null;
+                    }
+                    return defaultInvoke(proxy, method, args);
+                }
+            );
+
             Method addBefore = pipeline.getClass().getMethod("addBefore", String.class, String.class, channelHandlerClass);
             addBefore.invoke(pipeline, "packet_handler", HANDSHAKE_INTERCEPTOR_NAME, interceptor);
-            inserted = true;
-        } catch (Throwable ignored) {}
-
-        if (!inserted) {
-            try {
-                Method names = pipeline.getClass().getMethod("names");
-                Object namesList = names.invoke(pipeline);
-                if (namesList instanceof List) {
-                    List<?> list = (List<?>) namesList;
-                    for (int i = list.size() - 1; i >= 0; i--) {
-                        Object n = list.get(i);
-                        if (!(n instanceof String)) continue;
-                        String sn = (String) n;
-                        if (sn.equals(ACCEPT_OBSERVER_NAME) || sn.equals(HANDSHAKE_INTERCEPTOR_NAME)) continue;
-                        try {
-                            Method addBefore = pipeline.getClass().getMethod("addBefore", String.class, String.class, channelHandlerClass);
-                            addBefore.invoke(pipeline, sn, HANDSHAKE_INTERCEPTOR_NAME, interceptor);
-                            inserted = true;
-                            break;
-                        } catch (Throwable ignored) {}
-                    }
-                }
-            } catch (Throwable ignored) {}
-        }
-
-        if (!inserted) {
-            try {
-                Method addLast = pipeline.getClass().getMethod("addLast", String.class, channelHandlerClass);
-                addLast.invoke(pipeline, HANDSHAKE_INTERCEPTOR_NAME, interceptor);
-            } catch (Throwable ignored) {}
+            log.info("[MCServerHost] Handshake interceptor installed on child: " + childChannel);
+        } catch (Throwable e) {
+            log.warning("[MCServerHost] addHandshakeInterceptor failed: " + e);
+            e.printStackTrace();
         }
     }
 
@@ -343,21 +364,29 @@ public class LegacyNettyHandshakeInterceptor {
 
     private static void tryInterceptPacket(Object ctx, Object packet, PluginBase plugin) {
         if (packet == null) return;
+        Logger log = plugin.getLogger();
         String className = packet.getClass().getName();
-        if (!isHandshakePacket(packet)) return;
-
-        plugin.getDebugger().info("Fabric/Legacy handshake packet received: %s", className);
+        if (!isHandshakePacket(packet)) {
+            return;
+        }
+        log.info("[MCServerHost] Handshake packet received: " + className);
 
         try {
             Object connection = extractConnectionFromCtx(ctx);
             Object channel = extractChannelFromCtx(ctx);
+            log.info("[MCServerHost] connection=" + (connection == null ? "null" : connection.getClass().getName())
+                    + " channel=" + (channel == null ? "null" : channel.getClass().getName()));
             PacketContext packetCtx = new LegacyPacketContext(packet);
             PlayerContext player = new LegacyPlayerContext(connection, channel);
+            log.info("[MCServerHost] hostname=\"" + packetCtx.getPayloadString() + "\" realIp=" + player.getIP());
             plugin.getHandshakeHandler().handleHandshake(packetCtx, player);
+            log.info("[MCServerHost] After rewrite: ip=" + player.getIP());
         } catch (PluginException e) {
             plugin.getDebugger().exception(e);
+            log.warning("[MCServerHost] PluginException: " + e);
         } catch (Exception e) {
             plugin.getDebugger().exception(e);
+            log.warning("[MCServerHost] Exception: " + e);
         }
     }
 
@@ -373,18 +402,10 @@ public class LegacyNettyHandshakeInterceptor {
             }
             c = c.getSuperclass();
         }
-        Class<?>[] ifaces = packet.getClass().getInterfaces();
-        for (Class<?> i : ifaces) {
+        for (Class<?> i : packet.getClass().getInterfaces()) {
             if (i.getName().contains("Handshake") || i.getName().contains("Intention")) return true;
         }
-        boolean hasIntField = false, hasStringField = false, hasPortField = false;
-        for (Field f : packet.getClass().getDeclaredFields()) {
-            Class<?> t = f.getType();
-            if (t == int.class) hasIntField = true;
-            if (t == short.class) hasPortField = true;
-            if (t == String.class) hasStringField = true;
-        }
-        return hasIntField && hasStringField && hasPortField;
+        return false;
     }
 
     private static Object extractConnectionFromCtx(Object ctx) {
@@ -515,16 +536,6 @@ public class LegacyNettyHandshakeInterceptor {
             }
             if (connection != null) {
                 try {
-                    for (Method m : connection.getClass().getMethods()) {
-                        String n = m.getName();
-                        if ((n.equals("getRemoteAddress") || n.equals("getAddress") || n.equals("address"))
-                                && m.getParameterCount() == 0) {
-                            Object addr = m.invoke(connection);
-                            if (addr instanceof InetSocketAddress) {
-                                return ((InetSocketAddress) addr).getAddress().getHostAddress();
-                            }
-                        }
-                    }
                     Class<?> c = connection.getClass();
                     while (c != null) {
                         for (Field f : c.getDeclaredFields()) {
