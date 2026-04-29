@@ -4,6 +4,7 @@ import com.mcserverhost.FabricHandshakeSupport;
 import com.mcserverhost.FabricPacketContext;
 import com.mcserverhost.FabricPlayerContext;
 import com.mcserverhost.FabricPlugin;
+import net.minecraft.class_2889;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Pseudo;
 import org.spongepowered.asm.mixin.injection.At;
@@ -29,7 +30,7 @@ public abstract class MixinFabricHandshake {
         remap = false,
         require = 0
     )
-    private void mcsh$onHandleIntention(Object packet, CallbackInfo ci) {
+    private void mcsh$onHandleIntention(class_2889 packet, CallbackInfo ci) {
         System.out.println("[MCServerHost] [mixin] handleIntention fired. packet=" + (packet == null ? "null" : packet.getClass().getName()));
         FabricPlugin plugin = FabricPlugin.getInstance();
         if (plugin == null) {
