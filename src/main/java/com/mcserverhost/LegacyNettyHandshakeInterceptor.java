@@ -47,18 +47,48 @@ public class LegacyNettyHandshakeInterceptor {
 
     private static boolean tryInstall(PluginBase plugin, int attempt) throws Throwable {
         Logger log = plugin.getLogger();
-        Object server = findMinecraftServer(plugin, attempt);
-        if (server == null) {
-            if (attempt % 20 == 0) log.info("[MCServerHost] [attempt " + attempt + "] server instance not yet available");
-            return false;
+
+        Object io = FabricNetworkIoHolder.get();
+        if (io == null && attempt % 10 == 0) log.info("[MCServerHost] FabricNetworkIoHolder empty; trying to locate IO on server.");
+        if (io == null) {
+            Object server = findMinecraftServer(plugin, attempt);
+            if (server != null) io = findIoObjectOnServer(server, plugin, attempt);
+            if (io != null) FabricNetworkIoHolder.set(io);
         }
-        if (attempt % 20 == 0 || attempt == 1) {
-            log.info("[MCServerHost] [attempt " + attempt + "] server found: " + server.getClass().getName());
+        List<?> endpoints = null;
+        if (io != null) {
+            endpoints = findChannelFutureList(io, plugin);
+            if (endpoints == null) {
+                List<Object> direct = collectChannelsFromIo(io, plugin, attempt);
+                if (!direct.isEmpty()) {
+                    log.info("[MCServerHost] Found " + direct.size() + " channels directly on ServerNetworkIo.");
+                    Class<?> channelHandlerClass = Class.forName("io.netty.channel.ChannelHandler");
+                    boolean any = false;
+                    for (Object channel : direct) {
+                        try {
+                            log.info("[MCServerHost] server channel: " + channel.getClass().getName());
+                            if (installAcceptObserver(channel, channelHandlerClass, plugin)) any = true;
+                        } catch (Throwable e) {
+                            log.warning("[MCServerHost] accept install error: " + e);
+                            e.printStackTrace();
+                        }
+                    }
+                    return any;
+                }
+            }
         }
 
-        List<?> endpoints = findChannelFutureListDeep(server, plugin, attempt);
         if (endpoints == null || endpoints.isEmpty()) {
-            if (attempt % 20 == 0) log.info("[MCServerHost] [attempt " + attempt + "] no channel futures yet (deep scan)");
+            Object server = findMinecraftServer(plugin, attempt);
+            if (server == null) {
+                if (attempt % 20 == 0) log.info("[MCServerHost] [attempt " + attempt + "] server instance not yet available");
+                return false;
+            }
+            endpoints = findChannelFutureListDeep(server, plugin, attempt);
+        }
+
+        if (endpoints == null || endpoints.isEmpty()) {
+            if (attempt % 20 == 0) log.info("[MCServerHost] [attempt " + attempt + "] no channel futures yet");
             return false;
         }
         log.info("[MCServerHost] endpoints count: " + endpoints.size());
@@ -202,6 +232,8 @@ public class LegacyNettyHandshakeInterceptor {
 
     private static List<?> findChannelFutureList(Object obj, PluginBase plugin) {
         Class<?> c = obj.getClass();
+        List<?> firstEmptyList = null;
+        String firstEmptyDesc = null;
         while (c != null && c != Object.class) {
             for (Field f : c.getDeclaredFields()) {
                 if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
@@ -209,7 +241,13 @@ public class LegacyNettyHandshakeInterceptor {
                 Object v = readField(obj, f);
                 if (!(v instanceof List)) continue;
                 List<?> list = (List<?>) v;
-                if (list.isEmpty()) continue;
+                if (list.isEmpty()) {
+                    if (firstEmptyList == null) {
+                        firstEmptyList = list;
+                        firstEmptyDesc = c.getName() + "." + f.getName();
+                    }
+                    continue;
+                }
                 Object first = list.get(0);
                 if (first == null) continue;
                 String tn = first.getClass().getName();
@@ -220,7 +258,104 @@ public class LegacyNettyHandshakeInterceptor {
             }
             c = c.getSuperclass();
         }
+        if (firstEmptyList != null && plugin != null) {
+            plugin.getLogger().info("[MCServerHost] Only empty List<?> fields so far on " + obj.getClass().getName() + ", first empty: " + firstEmptyDesc);
+        }
         return null;
+    }
+
+    private static Object findIoObjectOnServer(Object server, PluginBase plugin, int attempt) {
+        Logger log = plugin.getLogger();
+        java.util.Set<Object> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        java.util.ArrayDeque<Object> queue = new java.util.ArrayDeque<>();
+        queue.add(server);
+        seen.add(server);
+        int visited = 0;
+        while (!queue.isEmpty() && visited < 500) {
+            Object obj = queue.poll();
+            visited++;
+            String cn = obj.getClass().getName();
+            if (cn.equals("net.minecraft.class_3242") || cn.endsWith(".ServerNetworkIo") || cn.endsWith(".ServerConnectionListener")) {
+                log.info("[MCServerHost] IO object located via server-graph: " + cn);
+                return obj;
+            }
+            Class<?> c = obj.getClass();
+            while (c != null && c != Object.class) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    Class<?> ft = f.getType();
+                    if (ft.isPrimitive() || ft.isArray() || ft == String.class || ft == Class.class) continue;
+                    String ftn = ft.getName();
+                    if (ftn.startsWith("java.") || ftn.startsWith("io.netty.") || ftn.startsWith("com.mojang.authlib")) continue;
+                    Object v = readField(obj, f);
+                    if (v == null) continue;
+                    String vn = v.getClass().getName();
+                    if (vn.equals("net.minecraft.class_3242") || vn.endsWith(".ServerNetworkIo") || vn.endsWith(".ServerConnectionListener")) {
+                        log.info("[MCServerHost] IO object located via " + c.getSimpleName() + "." + f.getName() + " = " + vn);
+                        return v;
+                    }
+                    if (seen.add(v)) queue.add(v);
+                }
+                c = c.getSuperclass();
+            }
+        }
+        if (attempt % 20 == 0) log.info("[MCServerHost] IO object not found after visiting " + visited + " nodes.");
+        return null;
+    }
+
+    private static List<Object> collectChannelsFromIo(Object io, PluginBase plugin, int attempt) {
+        Logger log = plugin.getLogger();
+        List<Object> out = new ArrayList<>();
+        Class<?> channelClass;
+        try {
+            channelClass = Class.forName("io.netty.channel.Channel");
+        } catch (Throwable e) {
+            log.warning("[MCServerHost] Netty Channel class not found: " + e);
+            return out;
+        }
+
+        boolean verbose = attempt % 10 == 0;
+        if (verbose) log.info("[MCServerHost] Enumerating ServerNetworkIo fields on " + io.getClass().getName());
+        Class<?> c = io.getClass();
+        while (c != null && c != Object.class) {
+            for (Field f : c.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                Object v = readField(io, f);
+                String vtype = v == null ? "null" : v.getClass().getName();
+                if (verbose) log.info("  " + c.getSimpleName() + "." + f.getName() + " : " + f.getType().getName() + " = " + vtype);
+                if (v == null) continue;
+                if (channelClass.isInstance(v)) {
+                    out.add(v);
+                    log.info("[MCServerHost] matched direct Channel field " + f.getName());
+                } else if (v.getClass().getName().contains("ChannelFuture")) {
+                    try {
+                        Object ch = v.getClass().getMethod("channel").invoke(v);
+                        if (ch != null) {
+                            out.add(ch);
+                            log.info("[MCServerHost] extracted channel from ChannelFuture field " + f.getName());
+                        }
+                    } catch (Throwable ignored) {}
+                } else if (v instanceof List) {
+                    for (Object el : (List<?>) v) {
+                        if (el == null) continue;
+                        if (channelClass.isInstance(el)) {
+                            out.add(el);
+                            log.info("[MCServerHost] matched Channel in list " + f.getName());
+                        } else if (el.getClass().getName().contains("ChannelFuture")) {
+                            try {
+                                Object ch = el.getClass().getMethod("channel").invoke(el);
+                                if (ch != null) {
+                                    out.add(ch);
+                                    log.info("[MCServerHost] extracted channel from ChannelFuture in list " + f.getName());
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                }
+            }
+            c = c.getSuperclass();
+        }
+        return out;
     }
 
     private static List<?> findChannelFutureListDeep(Object root, PluginBase plugin, int attempt) {
