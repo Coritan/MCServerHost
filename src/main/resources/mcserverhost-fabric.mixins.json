@@ -5,8 +5,7 @@
   "compatibilityLevel": "JAVA_8",
   "mixins": [],
   "server": [
-    "MixinMinecraftServer",
-    "MixinServerNetworkIo"
+    "MixinFabricHandshake"
   ],
   "injectors": {
     "defaultRequire": 0

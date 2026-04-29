@@ -33,8 +33,7 @@ public class FabricPlugin implements DedicatedServerModInitializer, PluginBase {
         try {
             GeyserHandler.init(this, config);
             initialization();
-            LegacyNettyHandshakeInterceptor.install(this);
-            logger.info("[MCServerHost] Fabric mod initialized.");
+            logger.info("[MCServerHost] Fabric mod initialized. Handshake interception via mixin.");
         } catch (Exception e) {
             logger.severe("[MCServerHost] Failed to initialize Fabric mod: " + e.getMessage());
             e.printStackTrace();
