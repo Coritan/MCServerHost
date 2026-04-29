@@ -39,17 +39,20 @@ public class BukkitPlugin extends JavaPlugin implements PluginBase {
 						getLogger().severe("MCSH is incompatible with ProtocolLib <= 5.2.1 on Paper 1.20.5/1.20.6 due to lack of support from ProtocolLib. Reverting to default Paper handler to prevent issues. This error can be avoided by disabling 'prefer-protocollib' in the config.");
 						backend = new PaperProvider(this);
 					} else {
-						backend = new ProtocolLibProvider(this);
+						// backend = new ProtocolLibProvider(this);
+						backend = new PaperProvider(this);
 					}
 				} catch (Exception t) {
 					getLogger().warning("Failed to check Paper or ProtocolLib version. This is not a critical error unless you are running Paper 1.20.5/1.20.6 with ProtocolLib version 5.2.1 or below.");
 					getDebugger().exception(t);
-					backend = new ProtocolLibProvider(this);
+					// backend = new ProtocolLibProvider(this);
+					backend = new PaperProvider(this);
 				}
 			} else if (hasPaperHandshakeEvent()) {
 				backend = new PaperProvider(this);
 			} else if (getServer().getPluginManager().getPlugin("ProtocolLib") != null) {
-				backend = new ProtocolLibProvider(this);
+				// backend = new ProtocolLibProvider(this);
+				backend = new PaperProvider(this);
 			} else {
 				getLogger().severe("MCSH not loading because ProtocolLib is not installed. Either use Paper to enable native compatibility or install ProtocolLib.");
 				return;

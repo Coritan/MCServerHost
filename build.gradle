@@ -41,7 +41,10 @@ sourceSets {
         java { srcDirs('src/stubs/java') }
     }
     main {
-        java { srcDirs('src/main/java') }
+        java {
+            srcDirs('src/main/java')
+            exclude 'com/mcserverhost/ProtocolLibProvider.java'
+        }
         resources { srcDirs('src/main/resources') }
         compileClasspath += sourceSets.stubs.output
     }
@@ -59,6 +62,9 @@ compileJava {
 
 repositories {
     maven {
+        url = 'https://repo.dmulloy2.net/repository/public/'
+    }
+    maven {
         url = 'https://repo.papermc.io/repository/maven-public/'
         content {
             includeGroup 'com.destroystokyo.paper'
@@ -69,6 +75,7 @@ repositories {
             includeGroup 'org.spigotmc'
             includeGroup 'org.bukkit'
             includeGroupByRegex 'net\\.kyori.*'
+            includeGroup 'com.comphenix.protocol'
         }
     }
     maven {
