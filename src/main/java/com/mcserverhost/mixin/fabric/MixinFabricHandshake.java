@@ -11,32 +11,35 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Fabric handshake interceptor. Injects at HEAD of handleIntention on
- * ServerHandshakePacketListenerImpl (intermediary class_3248 on 1.21.x).
- *
- * Kept minimal: the mixin only forwards to FabricHandshakeSupport so that
- * Mixin's inner-class generator does not have to resolve target classes
- * that are remapped at runtime.
+ * Injects at HEAD of handleIntention on class_3248 (ServerHandshakePacketListenerImpl).
+ * Intermediary: method_14414. We also try method_10766 (older name) and Mojang name.
  */
 @Pseudo
-@Mixin(targets = "net.minecraft.class_3248", remap = false)
+@Mixin(targets = {"net.minecraft.class_3246", "net.minecraft.class_3248"}, remap = false)
 public abstract class MixinFabricHandshake {
 
+    @Inject(method = "<init>", at = @At("RETURN"), require = 0)
+    private void mcsh$ctor(CallbackInfo ci) {
+        System.out.println("[MCServerHost] [mixin] handshake listener constructed: " + this.getClass().getName());
+    }
+
     @Inject(
-        method = {"method_14414", "handleIntention"},
+        method = {"method_12576", "method_14414", "onHandshake", "handleIntention"},
         at = @At("HEAD"),
         remap = false,
         require = 0
     )
     private void mcsh$onHandleIntention(Object packet, CallbackInfo ci) {
+        System.out.println("[MCServerHost] [mixin] handleIntention fired. packet=" + (packet == null ? "null" : packet.getClass().getName()));
         FabricPlugin plugin = FabricPlugin.getInstance();
-        if (plugin == null) return;
+        if (plugin == null) {
+            System.out.println("[MCServerHost] [mixin] plugin instance is null - bailing");
+            return;
+        }
         try {
             Object connection = FabricHandshakeSupport.findConnection(this);
-            if (connection == null) {
-                plugin.getLogger().warning("[MCServerHost] handshake: connection field not found on " + this.getClass().getName());
-                return;
-            }
+            System.out.println("[MCServerHost] [mixin] connection=" + (connection == null ? "null" : connection.getClass().getName()));
+            if (connection == null) return;
             FabricPacketContext packetCtx = new FabricPacketContext(packet);
             FabricPlayerContext player = new FabricPlayerContext(connection);
             plugin.getLogger().info("[MCServerHost] Handshake intercepted. Raw payload: \"" + packetCtx.getPayloadString() + "\", IP: " + player.getIP());
