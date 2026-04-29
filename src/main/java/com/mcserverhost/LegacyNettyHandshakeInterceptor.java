@@ -4,31 +4,29 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Set;
 
 /**
- * Mapping-agnostic Netty-based handshake interceptor. Used as the sole
- * install path on Fabric (where Yarn / Intermediary names make named
- * reflection impossible) and as a fallback on legacy Forge (1.12 and older,
- * where SpongePowered Mixin is not viable).
+ * Mapping-agnostic Netty-based handshake interceptor. Primary install path
+ * on Fabric (Yarn/Intermediary makes named reflection impractical) and
+ * fallback on legacy Forge 1.12 and older (no Mixin).
  *
- * Strategy, purely by reflection on Netty / java.lang types — no Minecraft
- * method or field names are referenced:
+ * Discovery:
+ *   - The MinecraftServer instance is captured by a mixin into its
+ *     constructor (see FabricServerHolder + mixin.fabric.MixinMinecraftServer).
+ *     We also try a class-getter fallback so legacy Forge (<=1.12) still
+ *     works without the mixin.
+ *   - On the server instance, locate a field whose value transitively
+ *     exposes a List of io.netty.channel.ChannelFuture (the network system).
  *
- *   1. Locate the running MinecraftServer. Try the classname-based path
- *      first, then fall back to scanning the server thread's Runnable graph
- *      for any object whose field graph contains a List of
- *      io.netty.channel.ChannelFuture.
- *   2. From that network-system-like object, extract the ChannelFuture list
- *      and resolve each entry to its listening server Channel.
- *   3. Add an observer to each server channel's pipeline that watches
- *      channelRead — its msg IS the new child Channel. For every child,
- *      inject a handshake interceptor into its pipeline positioned before
- *      the literal "packet_handler" handler (Minecraft uses this literal
- *      across all mappings) so we see decoded packets.
+ * Injection:
+ *   - For each listening server channel, install an "accept observer" that
+ *     fires on channelRead. The msg IS the new child Channel.
+ *   - For each child, defer interceptor insertion onto the child's
+ *     EventLoop. That guarantees it runs AFTER Minecraft's ChannelInitializer
+ *     has populated the pipeline with "packet_handler". We then insert our
+ *     handler with addBefore("packet_handler", ...) so it receives fully
+ *     decoded handshake packet objects.
  */
 public class LegacyNettyHandshakeInterceptor {
 
@@ -37,9 +35,9 @@ public class LegacyNettyHandshakeInterceptor {
 
     public static void install(PluginBase plugin) {
         Thread installThread = new Thread(() -> {
-            for (int attempt = 0; attempt < 60; attempt++) {
+            for (int attempt = 0; attempt < 120; attempt++) {
                 try {
-                    Thread.sleep(1000);
+                    Thread.sleep(500);
                 } catch (InterruptedException ignored) {
                     Thread.currentThread().interrupt();
                     return;
@@ -50,7 +48,7 @@ public class LegacyNettyHandshakeInterceptor {
                         return;
                     }
                 } catch (Throwable e) {
-                    if (attempt == 0 || attempt == 30) {
+                    if (attempt == 0 || attempt == 60) {
                         plugin.getLogger().warning("[MCServerHost] Install attempt " + attempt + " failed: " + e.getMessage());
                     }
                 }
@@ -71,13 +69,15 @@ public class LegacyNettyHandshakeInterceptor {
         for (Object serverChannel : serverChannels) {
             try {
                 if (installAcceptObserver(serverChannel, channelHandlerClass, plugin)) any = true;
-            } catch (Throwable ignored) {}
+            } catch (Throwable e) {
+                plugin.getLogger().warning("[MCServerHost] Failed to install on server channel: " + e.getMessage());
+            }
         }
         return any;
     }
 
     // -------------------------------------------------------------------------
-    // Server channel discovery — fully mapping-agnostic
+    // Server channel discovery
     // -------------------------------------------------------------------------
 
     private static List<Object> findServerChannels() {
@@ -101,6 +101,9 @@ public class LegacyNettyHandshakeInterceptor {
     }
 
     private static Object findMinecraftServer() {
+        Object captured = FabricServerHolder.getServer();
+        if (captured != null) return captured;
+
         try {
             Class<?> serverClass = Class.forName("net.minecraft.server.MinecraftServer");
             for (Method m : serverClass.getMethods()) {
@@ -113,44 +116,6 @@ public class LegacyNettyHandshakeInterceptor {
             }
         } catch (Throwable ignored) {}
 
-        try {
-            Field targetField = Thread.class.getDeclaredField("target");
-            targetField.setAccessible(true);
-            for (Thread t : Thread.getAllStackTraces().keySet()) {
-                if (t == null) continue;
-                String name = t.getName();
-                if (name == null || !name.contains("Server thread")) continue;
-                try {
-                    Object target = targetField.get(t);
-                    Set<Object> seen = Collections.newSetFromMap(new IdentityHashMap<>());
-                    Object server = searchForServer(target, 4, seen);
-                    if (server != null) return server;
-                } catch (Throwable ignored) {}
-            }
-        } catch (Throwable ignored) {}
-
-        return null;
-    }
-
-    private static Object searchForServer(Object obj, int depth, Set<Object> seen) {
-        if (obj == null || depth <= 0) return null;
-        if (!seen.add(obj)) return null;
-        if (findNetworkSystemIn(obj) != null) return obj;
-
-        Class<?> c = obj.getClass();
-        while (c != null && c != Object.class) {
-            for (Field f : c.getDeclaredFields()) {
-                Class<?> ft = f.getType();
-                if (ft.isPrimitive() || ft.isArray() || ft == String.class || ft == Class.class) continue;
-                try {
-                    f.setAccessible(true);
-                    Object v = f.get(obj);
-                    Object r = searchForServer(v, depth - 1, seen);
-                    if (r != null) return r;
-                } catch (Throwable ignored) {}
-            }
-            c = c.getSuperclass();
-        }
         return null;
     }
 
@@ -229,8 +194,7 @@ public class LegacyNettyHandshakeInterceptor {
                     Object child = args[1];
                     try {
                         if (child != null && isChannel(child)) {
-                            Object childPipeline = child.getClass().getMethod("pipeline").invoke(child);
-                            addHandshakeInterceptor(childPipeline, channelHandlerClass, plugin);
+                            scheduleInterceptorInsertion(child, channelHandlerClass, plugin);
                         }
                     } catch (Throwable ignored) {}
                     try {
@@ -249,6 +213,25 @@ public class LegacyNettyHandshakeInterceptor {
             return true;
         } catch (Throwable ignored) {}
         return false;
+    }
+
+    private static void scheduleInterceptorInsertion(Object childChannel, Class<?> channelHandlerClass, PluginBase plugin) {
+        try {
+            Object eventLoop = childChannel.getClass().getMethod("eventLoop").invoke(childChannel);
+            Runnable task = () -> {
+                try {
+                    Object pipeline = childChannel.getClass().getMethod("pipeline").invoke(childChannel);
+                    addHandshakeInterceptor(pipeline, channelHandlerClass, plugin);
+                } catch (Throwable ignored) {}
+            };
+            Method execute = eventLoop.getClass().getMethod("execute", Runnable.class);
+            execute.invoke(eventLoop, task);
+        } catch (Throwable ignored) {
+            try {
+                Object pipeline = childChannel.getClass().getMethod("pipeline").invoke(childChannel);
+                addHandshakeInterceptor(pipeline, channelHandlerClass, plugin);
+            } catch (Throwable ignored2) {}
+        }
     }
 
     private static void addHandshakeInterceptor(Object pipeline, Class<?> channelHandlerClass, PluginBase plugin) {
@@ -276,16 +259,41 @@ public class LegacyNettyHandshakeInterceptor {
             }
         );
 
+        boolean inserted = false;
         try {
             Method addBefore = pipeline.getClass().getMethod("addBefore", String.class, String.class, channelHandlerClass);
             addBefore.invoke(pipeline, "packet_handler", HANDSHAKE_INTERCEPTOR_NAME, interceptor);
-            return;
+            inserted = true;
         } catch (Throwable ignored) {}
 
-        try {
-            Method addLast = pipeline.getClass().getMethod("addLast", String.class, channelHandlerClass);
-            addLast.invoke(pipeline, HANDSHAKE_INTERCEPTOR_NAME, interceptor);
-        } catch (Throwable ignored) {}
+        if (!inserted) {
+            try {
+                Method names = pipeline.getClass().getMethod("names");
+                Object namesList = names.invoke(pipeline);
+                if (namesList instanceof List) {
+                    List<?> list = (List<?>) namesList;
+                    for (int i = list.size() - 1; i >= 0; i--) {
+                        Object n = list.get(i);
+                        if (!(n instanceof String)) continue;
+                        String sn = (String) n;
+                        if (sn.equals(ACCEPT_OBSERVER_NAME) || sn.equals(HANDSHAKE_INTERCEPTOR_NAME)) continue;
+                        try {
+                            Method addBefore = pipeline.getClass().getMethod("addBefore", String.class, String.class, channelHandlerClass);
+                            addBefore.invoke(pipeline, sn, HANDSHAKE_INTERCEPTOR_NAME, interceptor);
+                            inserted = true;
+                            break;
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+
+        if (!inserted) {
+            try {
+                Method addLast = pipeline.getClass().getMethod("addLast", String.class, channelHandlerClass);
+                addLast.invoke(pipeline, HANDSHAKE_INTERCEPTOR_NAME, interceptor);
+            } catch (Throwable ignored) {}
+        }
     }
 
     private static boolean isChannel(Object obj) {
@@ -336,21 +344,47 @@ public class LegacyNettyHandshakeInterceptor {
     private static void tryInterceptPacket(Object ctx, Object packet, PluginBase plugin) {
         if (packet == null) return;
         String className = packet.getClass().getName();
-        if (!className.contains("C00Handshake") && !className.contains("CHandshakePacket")
-                && !className.contains("ClientIntentionPacket") && !className.contains("Handshake")) {
-            return;
-        }
+        if (!isHandshakePacket(packet)) return;
+
+        plugin.getDebugger().info("Fabric/Legacy handshake packet received: %s", className);
 
         try {
             Object connection = extractConnectionFromCtx(ctx);
+            Object channel = extractChannelFromCtx(ctx);
             PacketContext packetCtx = new LegacyPacketContext(packet);
-            PlayerContext player = new LegacyPlayerContext(connection);
+            PlayerContext player = new LegacyPlayerContext(connection, channel);
             plugin.getHandshakeHandler().handleHandshake(packetCtx, player);
         } catch (PluginException e) {
             plugin.getDebugger().exception(e);
         } catch (Exception e) {
             plugin.getDebugger().exception(e);
         }
+    }
+
+    private static boolean isHandshakePacket(Object packet) {
+        Class<?> c = packet.getClass();
+        while (c != null && c != Object.class) {
+            String n = c.getName();
+            String s = c.getSimpleName();
+            if (n.contains("C00Handshake") || n.contains("CHandshakePacket")
+                    || n.contains("ClientIntentionPacket") || n.contains("HandshakeC2SPacket")
+                    || s.contains("Handshake") || s.contains("Intention")) {
+                return true;
+            }
+            c = c.getSuperclass();
+        }
+        Class<?>[] ifaces = packet.getClass().getInterfaces();
+        for (Class<?> i : ifaces) {
+            if (i.getName().contains("Handshake") || i.getName().contains("Intention")) return true;
+        }
+        boolean hasIntField = false, hasStringField = false, hasPortField = false;
+        for (Field f : packet.getClass().getDeclaredFields()) {
+            Class<?> t = f.getType();
+            if (t == int.class) hasIntField = true;
+            if (t == short.class) hasPortField = true;
+            if (t == String.class) hasStringField = true;
+        }
+        return hasIntField && hasStringField && hasPortField;
     }
 
     private static Object extractConnectionFromCtx(Object ctx) {
@@ -362,6 +396,15 @@ public class LegacyNettyHandshakeInterceptor {
             if (handler != null) return handler;
         } catch (Throwable ignored) {}
         return null;
+    }
+
+    private static Object extractChannelFromCtx(Object ctx) {
+        if (ctx == null) return null;
+        try {
+            return ctx.getClass().getMethod("channel").invoke(ctx);
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
 
@@ -452,39 +495,51 @@ public class LegacyNettyHandshakeInterceptor {
     private static class LegacyPlayerContext implements PlayerContext {
 
         private final Object connection;
+        private final Object channel;
         private String ip;
 
-        LegacyPlayerContext(Object connection) {
+        LegacyPlayerContext(Object connection, Object channel) {
             this.connection = connection;
-            this.ip = connection != null ? resolveRemoteAddress(connection) : "unknown";
+            this.channel = channel;
+            this.ip = resolveRemoteAddress();
         }
 
-        private static String resolveRemoteAddress(Object conn) {
-            try {
-                for (Method m : conn.getClass().getMethods()) {
-                    String n = m.getName();
-                    if ((n.equals("getRemoteAddress") || n.equals("func_150715_a") || n.equals("address"))
-                            && m.getParameterCount() == 0) {
-                        Object addr = m.invoke(conn);
-                        if (addr instanceof InetSocketAddress) {
-                            return ((InetSocketAddress) addr).getAddress().getHostAddress();
-                        }
+        private String resolveRemoteAddress() {
+            if (channel != null) {
+                try {
+                    Object addr = channel.getClass().getMethod("remoteAddress").invoke(channel);
+                    if (addr instanceof InetSocketAddress) {
+                        return ((InetSocketAddress) addr).getAddress().getHostAddress();
                     }
-                }
-                Class<?> c = conn.getClass();
-                while (c != null) {
-                    for (Field f : c.getDeclaredFields()) {
-                        if (java.net.SocketAddress.class.isAssignableFrom(f.getType())) {
-                            f.setAccessible(true);
-                            Object addr = f.get(conn);
+                } catch (Throwable ignored) {}
+            }
+            if (connection != null) {
+                try {
+                    for (Method m : connection.getClass().getMethods()) {
+                        String n = m.getName();
+                        if ((n.equals("getRemoteAddress") || n.equals("getAddress") || n.equals("address"))
+                                && m.getParameterCount() == 0) {
+                            Object addr = m.invoke(connection);
                             if (addr instanceof InetSocketAddress) {
                                 return ((InetSocketAddress) addr).getAddress().getHostAddress();
                             }
                         }
                     }
-                    c = c.getSuperclass();
-                }
-            } catch (Exception ignored) {}
+                    Class<?> c = connection.getClass();
+                    while (c != null) {
+                        for (Field f : c.getDeclaredFields()) {
+                            if (java.net.SocketAddress.class.isAssignableFrom(f.getType())) {
+                                f.setAccessible(true);
+                                Object addr = f.get(connection);
+                                if (addr instanceof InetSocketAddress) {
+                                    return ((InetSocketAddress) addr).getAddress().getHostAddress();
+                                }
+                            }
+                        }
+                        c = c.getSuperclass();
+                    }
+                } catch (Exception ignored) {}
+            }
             return "unknown";
         }
 
@@ -502,7 +557,7 @@ public class LegacyNettyHandshakeInterceptor {
             this.ip = newAddr.getAddress().getHostAddress();
             if (connection == null) return;
             try {
-                Field addressField = findConnectionAddressField(connection);
+                Field addressField = findSocketAddressField(connection.getClass());
                 if (addressField == null) return;
                 addressField.setAccessible(true);
                 try {
@@ -523,29 +578,14 @@ public class LegacyNettyHandshakeInterceptor {
             return (sun.misc.Unsafe) f.get(null);
         }
 
-        private static Field findConnectionAddressField(Object connection) {
-            for (String name : new String[]{"field_150744_e", "socketAddress", "address", "remoteAddress"}) {
-                Field f = findField(connection.getClass(), name);
-                if (f != null && java.net.SocketAddress.class.isAssignableFrom(f.getType())) {
-                    return f;
-                }
-            }
-            Class<?> clazz = connection.getClass();
-            while (clazz != null) {
+        private static Field findSocketAddressField(Class<?> startClass) {
+            Class<?> clazz = startClass;
+            while (clazz != null && clazz != Object.class) {
                 for (Field f : clazz.getDeclaredFields()) {
                     if (java.net.SocketAddress.class.isAssignableFrom(f.getType())) {
                         return f;
                     }
                 }
-                clazz = clazz.getSuperclass();
-            }
-            return null;
-        }
-
-        private static Field findField(Class<?> startClass, String name) {
-            Class<?> clazz = startClass;
-            while (clazz != null) {
-                try { return clazz.getDeclaredField(name); } catch (NoSuchFieldException ignored) {}
                 clazz = clazz.getSuperclass();
             }
             return null;
