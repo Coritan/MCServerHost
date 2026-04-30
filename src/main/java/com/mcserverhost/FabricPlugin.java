@@ -76,8 +76,5 @@ public class FabricPlugin implements PluginBase, DedicatedServerModInitializer {
         private FabricConfig() {
             this.dataFolder = new File("config/mcserverhost");
         }
-
-        @Override
-        public boolean doDebug() { return true; }
     }
 }

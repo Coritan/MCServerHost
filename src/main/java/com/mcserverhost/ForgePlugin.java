@@ -342,11 +342,6 @@ public class ForgePlugin implements PluginBase {
         private ForgeConfig() {
             this.dataFolder = new File("config/mcserverhost");
         }
-
-        @Override
-        public boolean doDebug() {
-            return true;
-        }
     }
 
 }

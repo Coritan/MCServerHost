@@ -48,9 +48,9 @@ public abstract class MixinClientIntentionPacket121 {
             PacketContext packetCtx = new PacketContext121(packet);
             Object connection = ConnectionLocator.extractConnectionFromListener(this);
             PlayerContext player = new PlayerContext121(connection);
-            plugin.getLogger().info("[MCServerHost] Handshake intercepted. Raw payload: \"" + packetCtx.getPayloadString() + "\", IP: " + player.getIP());
+            plugin.getDebugger().info("Handshake intercepted. Raw payload: \"%s\", IP: %s", packetCtx.getPayloadString(), player.getIP());
             plugin.getHandshakeHandler().handleHandshake(packetCtx, player);
-            plugin.getLogger().info("[MCServerHost] Handshake handled. New IP: " + player.getIP());
+            plugin.getDebugger().info("Handshake handled. New IP: %s", player.getIP());
         } catch (PluginException e) {
             plugin.getLogger().warning("[MCServerHost] Handshake PluginException: " + e.getMessage());
             plugin.getDebugger().exception(e);
