@@ -220,14 +220,31 @@ public class ForgePlugin implements PluginBase {
     }
 
     private void registerForgeCommands(Object registerCommandsEvent) {
-        if (hubConfig == null || !hubConfig.isHubCommandEnabled()) return;
+        if (hubConfig == null) return;
         try {
             Method getDispatcher = registerCommandsEvent.getClass().getMethod("getDispatcher");
             Object dispatcher = getDispatcher.invoke(registerCommandsEvent);
-            ForgeHubCommand.register(dispatcher, hubConfig, logger);
+            if (hubConfig.isHubCommandEnabled()) {
+                ForgeHubCommand.register(dispatcher, hubConfig, logger);
+            }
+            FabricStopCommand.register(dispatcher, hubConfig, ForgePlugin::findServerInstance, logger);
         } catch (Throwable e) {
-            logger.warning("[MCServerHost] Could not register hub command: " + e.getMessage());
+            logger.warning("[MCServerHost] Could not register commands: " + e.getMessage());
         }
+    }
+
+    private static Object findServerInstance() {
+        try {
+            Class<?> c = Class.forName("net.minecraft.server.MinecraftServer");
+            for (Method m : c.getMethods()) {
+                if (m.getParameterCount() == 0 && c.isAssignableFrom(m.getReturnType())
+                        && java.lang.reflect.Modifier.isStatic(m.getModifiers())) {
+                    try { return m.invoke(null); } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     private void doInit() {
@@ -278,22 +295,28 @@ public class ForgePlugin implements PluginBase {
     }
 
     private void registerForgeCommandsFromStartingEvent(FMLServerStartingEvent event) {
-        if (hubConfig == null || !hubConfig.isHubCommandEnabled()) return;
+        if (hubConfig == null) return;
         try {
             Method getCommandDispatcher = event.getClass().getMethod("getCommandDispatcher");
             Object dispatcher = getCommandDispatcher.invoke(event);
-            ForgeHubCommand.register(dispatcher, hubConfig, logger);
+            if (hubConfig.isHubCommandEnabled()) {
+                ForgeHubCommand.register(dispatcher, hubConfig, logger);
+            }
+            FabricStopCommand.register(dispatcher, hubConfig, ForgePlugin::findServerInstance, logger);
         } catch (Throwable e) {
-            logger.warning("[MCServerHost] Could not register hub command from ServerStartingEvent: " + e.getMessage());
+            logger.warning("[MCServerHost] Could not register commands from ServerStartingEvent: " + e.getMessage());
         }
     }
 
     private void tryRegisterCommandsFromEvent(Object event) {
-        if (hubConfig == null || !hubConfig.isHubCommandEnabled()) return;
+        if (hubConfig == null) return;
         try {
             Method getCommandDispatcher = event.getClass().getMethod("getCommandDispatcher");
             Object dispatcher = getCommandDispatcher.invoke(event);
-            ForgeHubCommand.register(dispatcher, hubConfig, logger);
+            if (hubConfig.isHubCommandEnabled()) {
+                ForgeHubCommand.register(dispatcher, hubConfig, logger);
+            }
+            FabricStopCommand.register(dispatcher, hubConfig, ForgePlugin::findServerInstance, logger);
         } catch (Throwable ignored) {
         }
     }

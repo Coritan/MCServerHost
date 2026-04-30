@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.mcserverhost.mixin.fabric",
+  "compatibilityLevel": "JAVA_8",
+  "mixins": [],
+  "server": [
+    "MixinFabricHandshake",
+    "MixinFabricServerLifecycle",
+    "MixinFabricCommandManager"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}
