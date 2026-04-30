@@ -4,7 +4,7 @@ license="All Rights Reserved"
 
 [[mods]]
     modId="mcserverhost"
-    version="1.1.0"
+    version="1.2.0"
     displayName="MCServerHost"
     description='''
         MCServerHost IP parsing capabilities for Forge servers.

@@ -1,1 +1,1 @@
-{"id":"mcserverhost","name":"MCServerHost","version":"1.1.0","description":"MCServerHost IP parsing capabilities for Velocity","authors":["https://www.mcserverhost.com"],"dependencies":[{"id":"floodgate","optional":true}],"main":"com.mcserverhost.VelocityPlugin"}
+{"id":"mcserverhost","name":"MCServerHost","version":"1.2.0","description":"MCServerHost IP parsing capabilities for Velocity","authors":["https://www.mcserverhost.com"],"dependencies":[{"id":"floodgate","optional":true}],"main":"com.mcserverhost.VelocityPlugin"}
