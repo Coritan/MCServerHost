@@ -18,6 +18,13 @@ public class FabricStopCommand {
                 FabricStopCommand.class.getClassLoader(),
                 new Class[]{requiresInterface},
                 (proxy, method, args) -> {
+                    if (method.getDeclaringClass() == Object.class) {
+                        switch (method.getName()) {
+                            case "hashCode": return System.identityHashCode(proxy);
+                            case "equals": return proxy == args[0];
+                            case "toString": return "MCServerHost$StopRequires";
+                        }
+                    }
                     if (method.getName().equals("test")) {
                         return hasStopPermission(args[0]);
                     }
@@ -31,6 +38,13 @@ public class FabricStopCommand {
                 FabricStopCommand.class.getClassLoader(),
                 new Class[]{commandInterface},
                 (proxy, method, args) -> {
+                    if (method.getDeclaringClass() == Object.class) {
+                        switch (method.getName()) {
+                            case "hashCode": return System.identityHashCode(proxy);
+                            case "equals": return proxy == args[0];
+                            case "toString": return "MCServerHost$StopCommand";
+                        }
+                    }
                     if (method.getName().equals("run")) {
                         handle(args[0], hubConfig, serverSupplier, logger);
                         return 1;

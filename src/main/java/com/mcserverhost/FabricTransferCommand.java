@@ -17,6 +17,13 @@ public class FabricTransferCommand {
                 FabricTransferCommand.class.getClassLoader(),
                 new Class[]{commandInterface},
                 (proxy, method, args) -> {
+                    if (method.getDeclaringClass() == Object.class) {
+                        switch (method.getName()) {
+                            case "hashCode": return System.identityHashCode(proxy);
+                            case "equals": return proxy == args[0];
+                            case "toString": return "MCServerHost$TransferCommand";
+                        }
+                    }
                     if (method.getName().equals("run")) {
                         handle(args[0], hubConfig, logger);
                         return 1;

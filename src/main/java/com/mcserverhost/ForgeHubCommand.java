@@ -28,6 +28,13 @@ public class ForgeHubCommand {
             ForgeHubCommand.class.getClassLoader(),
             new Class[]{commandInterface},
             (proxy, method, args) -> {
+                if (method.getDeclaringClass() == Object.class) {
+                    switch (method.getName()) {
+                        case "hashCode": return System.identityHashCode(proxy);
+                        case "equals": return proxy == args[0];
+                        case "toString": return "MCServerHost$HubCommand";
+                    }
+                }
                 if (method.getName().equals("run")) {
                     Object context = args[0];
                     handleHubCommand(context, hubConfig, logger);
