@@ -1,7 +1,6 @@
 package com.mcserverhost.mixin.fabric;
 
 import com.mcserverhost.FabricPlugin;
-import net.minecraft.class_2170;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Pseudo;
 import org.spongepowered.asm.mixin.injection.At;
@@ -11,7 +10,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import java.lang.reflect.Method;
 
 @Pseudo
-@Mixin(class_2170.class)
+@Mixin(targets = "net.minecraft.class_2170")
 public abstract class MixinFabricCommandManager {
 
     @Inject(method = "<init>*", at = @At("RETURN"), require = 0)
