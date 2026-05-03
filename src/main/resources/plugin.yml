@@ -9,6 +9,3 @@ description: MCServerHost IP parsing capabilities for Bukkit/Spigot/Paper
 commands:
   mcsh:
     description: Transfer to the hub server
-  stop:
-    description: Send all players to hub then stop the server
-    permission: minecraft.command.stop
